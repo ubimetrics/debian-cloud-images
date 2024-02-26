@@ -1,0 +1,115 @@
+name: Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - v*
+
+permissions:
+  contents: write
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  download:
+    name: Download image
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Load settings
+        run: source settings.sh
+
+      - id: cache
+        name: Cache
+        uses: actions/cache@v4
+        with:
+          key: ${{ env.GIT_CACHE_NAME }}
+          path: ${{ env.IMAGE_FILENAME }}
+
+      - name: Download original image
+        run: wget "$DEBIAN_FILEURL"
+        if: steps.cache.outputs.cache-hit != 'true'
+
+  customize:
+    name: Customize image
+    needs: download
+    runs-on: ubuntu-latest
+
+    strategy:
+      matrix:
+        variant: [qemu, locales, extras]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Load settings
+        run: source settings.sh
+
+      - name: Load cached files
+        uses: actions/cache@v4
+        with:
+          key: ${{ env.GIT_CACHE_NAME }}
+          path: ${{ env.IMAGE_FILENAME }}
+
+      - name: Install libguestfs
+        run: sudo apt-get install -y libguestfs-tools
+
+      - name: Rebuild image
+        run: ./customize.sh ${{ env.IMAGE_FILENAME }} ${{ matrix.variant }}
+
+      - name: Compress image artifact
+        run: |
+          sudo virt-sparsify ${{ env.IMAGE_FILENAME }} \
+            --compress ${{ env.ARTIFACT_NAME }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.ARTIFACT_NAME }}
+          retention-days: 1
+
+  release:
+    name: Create release
+    needs: customize
+    runs-on: ubuntu-latest
+    # if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/')
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Load settings
+        run: source settings.sh
+
+      - name: Load cached files
+        uses: actions/cache@v4
+        with:
+          key: ${{ env.GIT_CACHE_NAME }}
+          path: ${{ env.IMAGE_FILENAME }}
+
+      - name: Download all workflow run artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+
+      - name: Create release draft
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+              --repo="${GITHUB_REPOSITORY}" \
+              --title="${GITHUB_REF_NAME}" \
+              --verify-tag \
+              --latest \
+              --draft
+
+      - name: Upload original image artifact
+        run: gh release upload "${GITHUB_REF_NAME}" *.qcow2 --clobber
+
+      - run: echo "### Finished! :rocket:" >> $GITHUB_STEP_SUMMARY
